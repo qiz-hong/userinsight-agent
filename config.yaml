@@ -1,0 +1,41 @@
+# UserInsight Agent Configuration
+
+# --- Data Settings ---
+data:
+  file_path: "data/sample_user_data.csv"   # Input data file path
+  user_id_column: "user_id"                 # User identifier column
+  date_column: "event_date"                 # Date/time column
+  amount_column: "amount"                   # Monetary column (optional)
+
+# --- Data Cleaning ---
+cleaning:
+  drop_duplicates: true
+  fill_missing_strategy: "median"           # median, mean, mode, drop
+  outlier_method: "iqr"                     # iqr, zscore
+  outlier_columns: []                       # Columns to check outliers (empty = numeric)
+
+# --- Feature Engineering ---
+features:
+  encode_categorical: true                  # Encode categorical columns
+  encode_method: "onehot"                   # onehot, label
+  scale_numerical: true                     # Scale numerical features
+  scale_method: "standard"                  # standard, minmax
+
+# --- User Segmentation ---
+segmentation:
+  method: "rfm"                             # rfm, kmeans, both
+  kmeans_clusters: 4                        # Number of clusters for K-Means
+  rfm_reference_date: null                  # Reference date for RFM (null = max date)
+
+# --- Behavior Prediction ---
+prediction:
+  target_column: "churn"                    # Target column for prediction
+  model_type: "rf"                          # rf (RandomForest), lr (LogisticRegression)
+  test_size: 0.2                            # Test split ratio
+
+# --- Output ---
+output:
+  dir: "output"                             # Output directory
+  excel_report: true                        # Generate Excel report
+  html_report: true                         # Generate HTML report
+  save_charts: true                         # Save individual charts

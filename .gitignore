@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data files (keep sample, ignore large)
+data/*.csv
+data/*.xlsx
+data/*.json
+!data/sample_*.csv
+!data/.gitkeep
+
+# Output
+output/*
+!output/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
