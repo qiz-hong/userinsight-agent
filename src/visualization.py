@@ -126,6 +126,84 @@ class Visualizer:
         plt.tight_layout()
         return self._save("feature_importance.png", fig)
 
+    def plot_confusion_matrix(
+        self, y_true: np.ndarray, y_pred: np.ndarray,
+        class_names: list = None, save: bool = True,
+    ) -> str:
+        """Confusion matrix heatmap showing prediction vs actual."""
+        from sklearn.metrics import confusion_matrix
+        cm = confusion_matrix(y_true, y_pred)
+        if class_names is None:
+            class_names = [str(c) for c in sorted(set(y_true))]
+
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.heatmap(
+            cm, annot=True, fmt="d", cmap="Blues",
+            xticklabels=class_names, yticklabels=class_names,
+            linewidths=0.5, ax=ax,
+        )
+        _safe_title(ax, "Confusion Matrix — Prediction vs Actual")
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
+        plt.tight_layout()
+        return self._save("confusion_matrix.png", fig)
+
+    def plot_prediction_distribution(
+        self, y_true: np.ndarray, y_proba: np.ndarray,
+        target_name: str = "target", save: bool = True,
+    ) -> str:
+        """Histogram of predicted probabilities, colored by true class."""
+        if y_proba is None or y_true is None:
+            return ""
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        classes = sorted(set(y_true))
+        colors = sns.color_palette("Set2", len(classes))
+
+        for i, cls in enumerate(classes):
+            mask = y_true == cls
+            ax.hist(
+                y_proba[mask], bins=20, alpha=0.6,
+                color=colors[i], label=f"Actual Class {cls}",
+                edgecolor="white",
+            )
+        ax.axvline(x=0.5, color="red", linestyle="--", linewidth=1.5, label="Decision Boundary")
+        _safe_title(ax, f"Prediction Probability Distribution ({target_name})")
+        ax.set_xlabel(f"Predicted Probability of Class 1 ({target_name})")
+        ax.set_ylabel("User Count")
+        ax.legend()
+        plt.tight_layout()
+        return self._save("prediction_distribution.png", fig)
+
+    def plot_model_performance(
+        self, metrics: dict, save: bool = True,
+    ) -> str:
+        """Simple summary card showing model metrics as a chart."""
+        if not metrics:
+            return ""
+
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.axis("off")
+
+        lines = [
+            f"Model: {metrics.get('model', 'N/A')}",
+            f"Target: {metrics.get('target', 'N/A')}",
+            f"Accuracy: {metrics.get('accuracy', 'N/A')}",
+            f"CV Mean Score: {metrics.get('cv_mean', 'N/A')}",
+            f"Test Samples: {metrics.get('test_samples', 'N/A')}",
+            f"Classes: {metrics.get('classes', [])}",
+        ]
+        text = "\n".join(lines)
+        ax.text(
+            0.5, 0.5, text, transform=ax.transAxes,
+            fontsize=14, verticalalignment="center", horizontalalignment="center",
+            fontfamily="monospace",
+            bbox=dict(boxstyle="round,pad=0.5", facecolor="#E8F0FE", edgecolor="#4A90D9"),
+        )
+        _safe_title(ax, "Prediction Model Performance")
+        plt.tight_layout()
+        return self._save("model_performance.png", fig)
+
     # ── Internal ──────────────────────────────────────────────
 
     def _save(self, filename: str, fig) -> str:

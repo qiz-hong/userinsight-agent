@@ -29,6 +29,9 @@ class BehaviorPredictor:
         self.metrics_: dict = {}
         self._feature_cols: list = []
         self._target_col: str = ""
+        self.y_test_: np.ndarray = None
+        self.y_pred_: np.ndarray = None
+        self.y_proba_: np.ndarray = None  # prediction probabilities
 
     # ── Main API ─────────────────────────────────────────────
 
@@ -142,11 +145,21 @@ class BehaviorPredictor:
         y_pred = self.model.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
 
+        # Store predictions for charts
+        self.y_test_ = y_test
+        self.y_pred_ = y_pred
+        try:
+            self.y_proba_ = self.model.predict_proba(X_test)[:, 1]
+        except Exception:
+            self.y_proba_ = None
+
         self.metrics_ = {
             "model": self.model_name,
             "accuracy": round(acc, 4),
             "cv_mean": round(max(rf_score, lr_score), 4),
             "test_samples": len(y_test),
+            "target": self._target_col,
+            "classes": sorted(set(y_test)),
         }
         print(f"  Best model: {self.model_name}  (accuracy={acc:.3f})")
 

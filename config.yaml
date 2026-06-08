@@ -10,9 +10,9 @@ data:
 # --- Data Cleaning ---
 cleaning:
   drop_duplicates: true
-  fill_missing_strategy: "median"           # median, mean, mode, drop
+  fill_missing_strategy: "auto"             # auto | median | mean | mode | drop
   outlier_method: "iqr"                     # iqr, zscore
-  outlier_columns: []                       # Columns to check outliers (empty = numeric)
+  outlier_columns: []                       # Columns to check outliers (empty=auto)
 
 # --- Feature Engineering ---
 features:
@@ -23,15 +23,20 @@ features:
 
 # --- User Segmentation ---
 segmentation:
-  method: "rfm"                             # rfm, kmeans, both
-  kmeans_clusters: 4                        # Number of clusters for K-Means
-  rfm_reference_date: null                  # Reference date for RFM (null = max date)
+  method: "kmeans"                          # kmeans (RFM removed for simplicity)
+  n_clusters: null                          # null = Agent auto-selects via elbow method
 
 # --- Behavior Prediction ---
 prediction:
-  target_column: "churn"                    # Target column for prediction
-  model_type: "rf"                          # rf (RandomForest), lr (LogisticRegression)
+  target_column: null                       # null = auto-detect or use Agent suggestion
+  model_type: "auto"                        # auto = Agent selects RF vs LR via cross-val
   test_size: 0.2                            # Test split ratio
+
+# --- LLM Agent Settings ---
+llm:
+  enabled: true                             # Enable/disable Agent decision layer
+  model: "deepseek-chat"                    # LLM model name
+  temperature: 0.3                          # Lower = more deterministic
 
 # --- Output ---
 output:
