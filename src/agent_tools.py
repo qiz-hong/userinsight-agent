@@ -164,11 +164,14 @@ def engineer_features(id_column: str = "") -> str:
 
 
 @tool
-def segment_users(n_clusters: int = 0) -> str:
-    """Run K-Means clustering to segment users.
+def segment_users(n_clusters: int = 0, method: str = "auto") -> str:
+    """Segment users with automatic model selection.
 
     Args:
         n_clusters: number of segments; 0 = auto-select via elbow method
+        method: 'auto' (default) picks the best of kmeans / gmm /
+                hierarchical / dbscan by silhouette score; or name one
+                of those four explicitly
     """
     df_in = ws.df_features if ws.df_features is not None else (
         ws.df_clean if ws.df_clean is not None else ws.df)
@@ -177,18 +180,13 @@ def segment_users(n_clusters: int = 0) -> str:
     try:
         seg = UserSegmentation(df_in)
         k = n_clusters if n_clusters and n_clusters > 0 else None
-        ws.segment_labels = seg.auto_segment(n_clusters=k)
+        ws.segment_labels = seg.auto_segment(n_clusters=k,
+                                             method=method or "auto")
         ws.profiles = seg.get_segment_profiles()
         summary = seg.get_segment_summary()
-        # Silhouette score for the critic
-        try:
-            from sklearn.metrics import silhouette_score
-            X = df_in.select_dtypes(include=[np.number]).fillna(0).values
-            sil = silhouette_score(X, ws.segment_labels) \
-                if len(set(ws.segment_labels)) > 1 else 0.0
-        except Exception:
-            sil = None
+        sil = seg.silhouette_
         return (f"OK: {len(summary)} segments. "
+                f"Method={seg.method_}. "
                 f"Distribution: {json.dumps(summary, ensure_ascii=False)}. "
                 f"silhouette={None if sil is None else round(sil, 3)}")
     except Exception as e:
@@ -196,14 +194,16 @@ def segment_users(n_clusters: int = 0) -> str:
 
 
 @tool
-def train_predictor(target_column: str = "") -> str:
-    """Train a behavior-prediction model (RF vs LR auto-selected via
-    3-fold CV).
+def train_predictor(target_column: str = "", model: str = "auto") -> str:
+    """Train a behavior-prediction model. 'auto' selects the best of
+    LogisticRegression / RandomForest / GradientBoosting / SVC via
+    stratified cross-validation.
 
     Args:
         target_column: name of the label column; '' = auto-resolve
                        (explicit column -> smallest segment as churn
                        -> auto-detect binary column)
+        model: 'auto' or one of the four model names above
     """
     df_in = ws.df_features if ws.df_features is not None else (
         ws.df_clean if ws.df_clean is not None else ws.df)
@@ -214,16 +214,18 @@ def train_predictor(target_column: str = "") -> str:
         pred.auto_predict(
             target_column=target_column or None,
             segment_labels=ws.segment_labels,
+            model=model or "auto",
         )
         ws.predictor = pred
         ws.importance_df = pred.get_feature_importance()
         ws.pred_metrics = pred.get_metrics()
         if not ws.pred_metrics:
             return "ERROR: no usable target found for prediction."
+        cv_pool = ws.pred_metrics.get("model_cv") or {}
         return (f"OK: model={ws.pred_metrics.get('model')}, "
                 f"target={ws.pred_metrics.get('target')}, "
                 f"accuracy={ws.pred_metrics.get('accuracy')}, "
-                f"cv_mean={ws.pred_metrics.get('cv_mean')}")
+                f"cv={json.dumps(cv_pool, ensure_ascii=False)}")
     except Exception as e:
         return f"ERROR: prediction failed: {e}"
 

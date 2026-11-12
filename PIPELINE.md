@@ -51,8 +51,8 @@
 | `inspect_schema` | 结构摘要（dtype/唯一值/缺失率） | — |
 | `clean_data` | 去重/填充/离群剔除 | fill_strategy, drop_outliers |
 | `engineer_features` | 类型识别/编码/缩放/时间特征 | id_column |
-| `segment_users` | K-Means 分群 | n_clusters（0=肘部自动） |
-| `train_predictor` | RF vs LR 交叉验证选模 | target_column |
+| `segment_users` | 四算法自动择优分群（K-Means/GMM/层次/DBSCAN，轮廓系数评选） | n_clusters（0=肘部自动）, method |
+| `train_predictor` | 四模型交叉验证选模（LR/RF/GBDT/SVM） | target_column, model |
 | `plot_charts` | 7 类图表 | — |
 | `generate_report` | Excel + HTML 报告 | — |
 | `quality_check` | 数据质量指标（供 Critic） | — |

@@ -152,7 +152,8 @@ Rules:
 - Output ONLY JSON: {"plan": [{"tool": str, "args": dict, "criteria": str}]}
 - Available tools and their args:
   load_data(file_path), inspect_schema(), clean_data(fill_strategy, drop_outliers, outlier_columns),
-  engineer_features(id_column), segment_users(n_clusters), train_predictor(target_column),
+  engineer_features(id_column), segment_users(n_clusters, method),
+  train_predictor(target_column, model),
   plot_charts(), generate_report(), quality_check()
 - Plan only the tools needed to satisfy the goal, in dependency order.
 - clean_data should come after load_data; engineer_features after clean_data;

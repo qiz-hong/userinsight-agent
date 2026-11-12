@@ -1,4 +1,4 @@
-# UserInsight Agent
+# 基于LLM Agent决策的自适应用户画像与行为预测系统（UserInsight Agent）
 
 自主规划式用户智能分析 Agent —— 基于 **LangGraph** 的 LLM Agent，面向数据分析 / 数据科学岗位的项目。
 
@@ -26,7 +26,8 @@ LLM 将自然语言目标分解为带依赖关系的工具调用计划（DAG）�
 - **高缺失率列（>80%）自动剔除**，避免单值填充引入假信号
 - 常量列（零方差）自动剔除、inf 值自动转 NaN
 - 4 类字段类型自动识别（时间/分类/数值/ID）
-- K-Means 肘部法则自动定 K、RF vs LR 交叉验证自动选模
+- 聚类四算法（K-Means / GMM / 层次 / DBSCAN）按轮廓系数自动择优，DBSCAN 带噪声率与规模护栏
+- 分类四模型（LR / RF / GBDT / SVM）按分层交叉验证自动选模，不平衡标签自动加平衡权重
 
 ### 6. 优雅降级
 无 API Key 时每个 LLM 节点回退为确定性策略（静态计划 + 规则 Critic），全流程仍可运行。
@@ -57,8 +58,8 @@ userinsight-agent/
 │   ├── data_loader.py         # 加载 + 列名清洗 + 边界处理
 │   ├── data_cleaner.py        # 清洗 + 高缺失列策略
 │   ├── feature_engineering.py # 特征工程（自动类型识别）
-│   ├── user_segmentation.py   # K-Means 分群（肘部法则）
-│   ├── behavior_prediction.py # 流失预测（RF/LR 自动选模）
+│   ├── user_segmentation.py   # 四算法自动择优分群（K-Means/GMM/层次/DBSCAN）
+│   ├── behavior_prediction.py # 流失预测（LR/RF/GBDT/SVM 自动选模）
 │   ├── visualization.py       # 7 类图表
 │   └── report_generator.py    # Excel / HTML / 控制台报告
 ├── data/                      # 输入数据（含示例）

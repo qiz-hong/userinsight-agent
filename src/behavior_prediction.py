@@ -2,17 +2,26 @@
 Behavior Prediction Module
 
 Predicts user behavior including:
-- Churn prediction (logistic regression / random forest)
+- Churn prediction (logistic regression / random forest /
+  gradient boosting / SVM)
 - Next-action prediction (classification)
 - Outputs prediction results and feature importance
+
+Model selection: 'auto' evaluates every candidate in the pool with
+stratified 3-fold cross-validation and keeps the best mean accuracy.
 """
 
 import pandas as pd
 import numpy as np
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+
+# Candidate pool for auto model selection (all scikit-learn, no extra deps)
+MODEL_POOL = ["LogisticRegression", "RandomForest",
+              "GradientBoosting", "SVC"]
 
 
 class BehaviorPredictor:
@@ -36,7 +45,8 @@ class BehaviorPredictor:
     # ── Main API ─────────────────────────────────────────────
 
     def auto_predict(
-        self, target_column: str = None, segment_labels: np.ndarray = None
+        self, target_column: str = None, segment_labels: np.ndarray = None,
+        model: str = "auto",
     ) -> "BehaviorPredictor":
         """
         Auto-select target, features, and best model.
@@ -45,6 +55,10 @@ class BehaviorPredictor:
           1. Explicit target_column if it exists in data
           2. segment_labels → treat smallest segment as "churn" class
           3. Auto-detect binary column in data
+
+        model: 'auto' (default) picks the best of
+               LogisticRegression / RandomForest / GradientBoosting / SVC
+               by stratified cross-validation; or name one of them.
         """
         # --- Resolve target ---
         y = self._resolve_target(target_column, segment_labels)
@@ -71,7 +85,7 @@ class BehaviorPredictor:
         )
 
         # --- Auto-select best model ---
-        self._auto_select_model(X_train, y_train, X_test, y_test)
+        self._select_model(X_train, y_train, X_test, y_test, model)
 
         # --- Feature importance ---
         self._compute_importance()
@@ -116,32 +130,51 @@ class BehaviorPredictor:
 
         return None
 
-    def _auto_select_model(self, X_train, y_train, X_test, y_test):
-        """Try RF and LR, pick the one with higher cross-val score."""
-        try:
-            rf = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
-            rf_scores = cross_val_score(rf, X_train, y_train, cv=3, scoring="accuracy")
-            rf_score = rf_scores.mean()
-        except Exception:
-            rf_score = 0
+    def _make_model(self, name: str):
+        """Factory for the candidate pool. Balanced class weights keep
+        the minority (churn) class learnable on skewed labels."""
+        if name == "LogisticRegression":
+            return LogisticRegression(max_iter=1000, random_state=42,
+                                      class_weight="balanced")
+        if name == "RandomForest":
+            return RandomForestClassifier(n_estimators=100, random_state=42,
+                                          n_jobs=-1, class_weight="balanced")
+        if name == "GradientBoosting":
+            return GradientBoostingClassifier(random_state=42)
+        if name == "SVC":
+            return SVC(probability=True, random_state=42,
+                       class_weight="balanced")
+        return None
 
-        try:
-            lr = LogisticRegression(max_iter=1000, random_state=42)
-            lr_scores = cross_val_score(lr, X_train, y_train, cv=3, scoring="accuracy")
-            lr_score = lr_scores.mean()
-        except Exception:
-            lr_score = 0
+    def _select_model(self, X_train, y_train, X_test, y_test, model="auto"):
+        """Evaluate candidate models with stratified CV and keep the best.
+        Guardrail: with a rare minority class, fall back to 2-fold CV.
+        """
+        candidates = [model] if model and model != "auto" else MODEL_POOL
 
-        if rf_score >= lr_score:
-            self.model = RandomForestClassifier(
-                n_estimators=100, random_state=42, n_jobs=-1
-            )
-            self.model_name = "RandomForest"
-        else:
-            self.model = LogisticRegression(max_iter=1000, random_state=42)
-            self.model_name = "LogisticRegression"
+        min_class = int(pd.Series(y_train).value_counts().min())
+        cv = 3 if min_class >= 3 else 2
 
+        scores = {}
+        for name in candidates:
+            try:
+                m = self._make_model(name)
+                if m is None:
+                    continue
+                s = cross_val_score(m, X_train, y_train, cv=cv,
+                                    scoring="accuracy")
+                scores[name] = round(float(s.mean()), 4)
+            except Exception as e:
+                print(f"  [{name}] skipped: {e}")
+
+        if not scores:
+            print("  No model succeeded — skipping prediction.")
+            return
+
+        best = max(scores, key=scores.get)
+        self.model = self._make_model(best)
         self.model.fit(X_train, y_train)
+        self.model_name = best
         y_pred = self.model.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
 
@@ -156,12 +189,14 @@ class BehaviorPredictor:
         self.metrics_ = {
             "model": self.model_name,
             "accuracy": round(acc, 4),
-            "cv_mean": round(max(rf_score, lr_score), 4),
+            "cv_mean": scores[best],
+            "model_cv": scores,
             "test_samples": len(y_test),
             "target": self._target_col,
-            "classes": sorted(set(y_test)),
+            "classes": [int(c) for c in sorted(set(y_test))],
         }
-        print(f"  Best model: {self.model_name}  (accuracy={acc:.3f})")
+        print(f"  Best model: {best}  (accuracy={acc:.3f}, "
+              f"cv={scores[best]}, pool={scores})")
 
     def _compute_importance(self):
         """Extract feature importance from the model."""
