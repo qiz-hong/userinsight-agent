@@ -156,8 +156,9 @@ class BehaviorPredictor:
                                   verbose=-1)
         if name == "CatBoost":
             from catboost import CatBoostClassifier
+            # allow_writing_files=False keeps the workspace clean
             return CatBoostClassifier(iterations=100, random_seed=42,
-                                      verbose=0)
+                                      verbose=0, allow_writing_files=False)
         return None
 
     def _select_model(self, X_train, y_train, X_test, y_test, model="auto"):

@@ -34,6 +34,9 @@ data/*.json
 output/*
 !output/.gitkeep
 
+# CatBoost training logs
+catboost_info/
+
 # OS
 .DS_Store
 Thumbs.db
