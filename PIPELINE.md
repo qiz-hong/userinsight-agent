@@ -1,245 +1,123 @@
-# UserInsight Agent — Pipeline & Usage Guide
+# UserInsight Agent — 架构与流程指南
 
-## 1. What This Agent Does
+## 1. Agent 能做什么
 
-This agent takes **any tabular user behavior data** (CSV/Excel) and automatically:
+输入任意表格型用户行为数据（CSV/Excel）+ 一句自然语言目标，Agent 自主完成：
 
-1. Cleans and normalizes it (missing values, outliers, type correction)
-2. Engineers features (encoding, scaling, time-based features)
-3. Segments users via clustering → **user profiling**
-4. Trains a prediction model → **behavior forecasting**
-5. Outputs charts + Excel/HTML reports
+1. **规划（Planner）**：分解目标为工具调用计划，召回 ChromaDB 长期记忆
+2. **执行（Executor）**：通过 Function Calling 自主选择 9 类工具及参数
+3. **反思（Critic）**：评估每步结果与数据质量，不达标自动回溯重试
+4. **汇总（Summarizer）**：生成业务报告 + 写入长期记忆
 
-**No manual configuration required** — the pipeline auto-detects column types,
-encodings, and selects the best ML model.
+**无需人工配置** — 列类型、编码、模型选择全部自适应。
 
 ---
 
-## 2. Pipeline Flow (7 Steps)
+## 2. Agent 图结构（LangGraph）
 
 ```
- ┌──────────┐    ┌──────────┐    ┌───────────────┐
- │ 1. LOAD  │───→│ 2. CLEAN │───→│ 3. FEATURE ENG │
- └──────────┘    └──────────┘    └───────┬───────┘
-                                         │
-      ┌──────────────────────────────────┘
-      ▼
- ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
- │ 4. SEGMENT   │───→│ 5. PREDICT   │───→│ 6. VISUALIZE │
- └──────────────┘    └──────────────┘    └──────┬───────┘
-                                                │
-                                                ▼
-                                         ┌──────────────┐
-                                         │ 7. REPORT    │
-                                         └──────────────┘
+                ┌────────────────────────────┐
+                │        Planner (LLM)        │
+                │  目标 → 任务计划 DAG + 记忆    │
+                └────────────┬───────────────┘
+                             ▼
+                ┌────────────────────────────┐
+        ┌──────→│       Executor (LLM)        │
+        │       │  Function Calling 选工具调参  │
+        │       └────────────┬───────────────┘
+        │                    ▼
+        │       ┌────────────────────────────┐
+        │       │        Critic (LLM)         │
+        │       │  评估结果 vs 成功标准         │
+        │       └─────┬──────────────┬───────┘
+        │     retry  │              │ pass
+        └────────────┘              ▼
+                     ┌────────────────────────────┐
+                     │      Summarizer (LLM)       │
+                     │  业务报告 + 写入 ChromaDB     │
+                     └────────────────────────────┘
 ```
 
----
-
-## 3. Step-by-Step Algorithm Details
-
-### Step 1: Data Loading (`data_loader.py`)
-
-| Sub-step | Algorithm |
-|---|---|
-| Format detection | `.csv` → CSV loader, `.xlsx/.xls` → Excel loader |
-| Encoding detection | Tries `utf-8` → `gbk` → `gb2312` → `latin-1` → `iso-8859-1` in order, picks first successful |
-| Validation | Rejects empty files; prints row × col count |
-
-**Input requirement**: Any CSV or Excel file with a header row.
+- **循环护栏**：`agent.max_iterations`（总轮数上限）+ 每步重试预算 3 次
+- **确定性兜底**：无 API Key 时 Planner 回退静态计划、Critic 回退规则判断，图照常运行
 
 ---
 
-### Step 2: Data Cleaning (`data_cleaner.py`)
+## 3. 工具清单（Function Calling）
 
-| Sub-step | Algorithm | Config override |
+| 工具 | 功能 | 关键参数 |
 |---|---|---|
-| **Drop duplicates** | `df.drop_duplicates()` — removes exact duplicate rows | `cleaning.drop_duplicates: false` |
-| **Fill missing** | **auto** strategy: numeric cols → median; categorical cols → mode. Other options: `mean`, `drop` | `cleaning.fill_missing_strategy` |
-| **Remove outliers** | **IQR method** (off by default): values beyond Q1-1.5×IQR or Q3+1.5×IQR are removed. Only applies to numeric columns. | `cleaning.outlier_columns` |
-| **Type correction** | Object columns are tested: (1) try `pd.to_datetime` → if >80% succeed, convert to datetime; (2) try `pd.to_numeric` → if >80% succeed, convert to float | — |
+| `load_data` | 加载 CSV/Excel | file_path |
+| `inspect_schema` | 结构摘要（dtype/唯一值/缺失率） | — |
+| `clean_data` | 去重/填充/离群剔除 | fill_strategy, drop_outliers |
+| `engineer_features` | 类型识别/编码/缩放/时间特征 | id_column |
+| `segment_users` | K-Means 分群 | n_clusters（0=肘部自动） |
+| `train_predictor` | RF vs LR 交叉验证选模 | target_column |
+| `plot_charts` | 7 类图表 | — |
+| `generate_report` | Excel + HTML 报告 | — |
+| `quality_check` | 数据质量指标（供 Critic） | — |
+
+工具在共享 Workspace 上操作；LLM 只传标量参数，从不传数据。
 
 ---
 
-### Step 3: Feature Engineering (`feature_engineering.py`)
+## 4. 脏数据边界处理
 
-This is the **core** of auto-adaptation. The method `auto_process()` classifies every column:
+### 加载层（data_loader.py）
+| 边界情况 | 处理 |
+|---|---|
+| 未知编码 | 6 级编码链探测（utf-8-sig → utf-8 → gbk → gb2312 → latin-1 → iso-8859-1） |
+| 空文件 / 全空数据 | 明确 ValueError，不崩溃 |
+| 重复/空白/注入字符列名 | 清洗为安全名（去空、去重、去特殊字符） |
+| 全空行/全空列 | 自动剔除并告警 |
 
-| Column type | Detection rule | Transformation |
+### 清洗层（data_cleaner.py）
+| 边界情况 | 处理 |
+|---|---|
+| 高缺失率列（>80%） | 自动剔除（单值填充会注入假信号） |
+| 常量列（零方差） | 自动剔除（无信息） |
+| inf / -inf | 自动转 NaN 再填充 |
+| 数值列缺失 | 中位数填充；类别列缺失 → 众数填充 |
+| 全部列被剔除 | 明确报错"数据不可用" |
+
+---
+
+## 5. 记忆体系（ChromaDB）
+
+| 类型 | 内容 | 用途 |
 |---|---|---|
-| **ID column** | Explicit (from `config.data.user_id_column`) or auto: unique-per-row AND unique count > 50 | **Dropped** |
-| **Datetime** | `datetime64` dtype (converted in Step 2) | Extract `year`, `month`, `day`, `dayofweek`, `recency` (days since latest date); drop original |
-| **Categorical (low cardinality)** | `object`/`category` dtype, OR integer with ≤20 unique values, AND unique count ≤10 | **One-hot encoding** (drop_first=True to avoid multicollinearity) |
-| **Categorical (high cardinality)** | Same detection, unique count >10 | **Label encoding** (0, 1, 2, ...) |
-| **Numeric** | Any remaining numeric dtype | **Standard scaling** (zero mean, unit variance via `StandardScaler`) |
+| `schema_*` | 数据集结构 + 质量要点 | 相似数据复用清洗经验 |
+| `strategy_*` | 有效的清洗/预测策略记录 | Planner 规划上下文 |
+| `insight_*` | 历史业务结论 | Summarizer 参考 |
 
-**Why this works**: The agent doesn't care what your columns are named — it infers from data types and value distributions. A column called `signup_date`, `created_at`, or `timestamp` will all be handled the same way as long as Step 2 converted them to datetime.
+chromadb 不可用时自动降级为 `output/memory/memory.json`（关键词匹配召回）。
 
 ---
 
-### Step 4: User Segmentation (`user_segmentation.py`)
-
-| Sub-step | Algorithm |
-|---|---|
-| **Feature selection** | Picks numeric columns, preferring keywords: `recency`, `freq`, `count`, `amount`, `day`. Caps at 8 features. |
-| **Cluster count (k)** | **Auto elbow method**: tries k=2..6, computes inertia for each, picks k where inertia improvement drops below 50% of the previous improvement. Falls back to k=3 if no clear elbow. |
-| **Clustering** | `sklearn.cluster.KMeans` with `n_init='auto'`, `random_state=42` |
-| **Segment profiling** | For each cluster: compute user count, percentage, and mean of each feature → `profiles_` DataFrame |
-
-**Output**: Each user gets a segment label (0, 1, 2...); the smallest segment is treated as the "at-risk" group for prediction.
-
----
-
-### Step 5: Behavior Prediction (`behavior_prediction.py`)
-
-| Sub-step | Algorithm |
-|---|---|
-| **Target resolution** | Priority: (1) config `prediction.target_column` if it exists in data → (2) use segment labels (smallest segment = churn) → (3) auto-detect any binary column |
-| **Feature selection** | All numeric columns except the target |
-| **Model selection** | Trains both **RandomForest** (100 trees) and **LogisticRegression**, compares 3-fold cross-val accuracy, picks the winner |
-| **Evaluation** | 80/20 train-test split (stratified), reports accuracy and CV score |
-
-**Note**: If your data has a real `churn` or `is_active` column, the agent will detect it automatically. If not, it creates a synthetic target from the segmentation results — treating the smallest user cluster as the "positive" class.
-
----
-
-### Step 6: Visualization (`visualization.py`)
-
-| Chart | Description | When generated |
-|---|---|---|
-| `segment_distribution.png` | Bar chart: user count per segment | Always (if segmentation succeeded) |
-| `segment_profiles.png` | Grouped bar: mean feature values per segment | Always (if segmentation succeeded) |
-| `correlation_heatmap.png` | Upper-triangle correlation matrix of all numeric features | Always (if ≥2 numeric features) |
-| `feature_importance.png` | Horizontal bar chart of top 15 features by importance | If prediction model was trained |
-
-All charts use non-interactive `Agg` backend; saved at 150 DPI.
-
----
-
-### Step 7: Report Generation (`report_generator.py`)
-
-| Report | Contents |
-|---|---|
-| `analysis_report.xlsx` | 4 sheets: Segments (user labels), Profiles (cluster stats), Feature_Importance (feature ranking), Metrics (model performance) |
-| `report.html` | Self-contained HTML page with summary statistics + embedded chart images |
-| Console output | Formatted text summary printed to terminal |
-
----
-
-## 4. How to Use with New Data
-
-### 4.1 Minimal Setup (3 steps)
+## 6. 运行方式
 
 ```bash
-# Step 1: Install dependencies (once)
-pip install -r requirements.txt
-
-# Step 2: Place your data file in data/ directory
-cp /path/to/your_user_data.csv data/
-
-# Step 3: Update config.yaml → data.file_path
-# Change:  file_path: "data/your_user_data.csv"
-
-# Step 4: Run
+# CLI（无 Key 自动降级为确定性流水线）
 python main.py
-```
 
-### 4.2 What Your Data Should Look Like
+# 指定数据与目标（程序化调用）
+from main import main_pipeline
+result = main_pipeline(
+    file_path="data/sample_user_data.csv",
+    goal="找出高价值流失风险用户",
+    api_key=None,          # 或传入 DeepSeek Key
+    max_iterations=15,     # 循环护栏
+)
 
-**Minimum**: Any CSV with a header row. The agent is **schema-flexible**.
-
-**Recommended** columns for best results:
-
-| Column type | Examples | Why useful |
-|---|---|---|
-| User ID | `user_id`, `customer_id` | Auto-dropped (not used as feature) |
-| Demographics | `age`, `gender`, `city`, `membership_tier` | Categorical → one-hot encoded; numeric → scaled |
-| Date/Time | `registration_date`, `last_login`, `order_date` | Auto-converted → recency, month, day-of-week features |
-| Behavior counts | `login_count`, `purchase_count`, `page_views` | Core features for segmentation & prediction |
-| Monetary | `total_spent`, `avg_order_value`, `ltv` | Key for high-value user identification |
-| Label (optional) | `churn`, `is_active`, `converted` | If present, used as prediction target |
-
-### 4.3 Configuration Reference (`config.yaml`)
-
-```yaml
-data:
-  file_path: "data/my_data.csv"       # ← CHANGE THIS to your file
-  user_id_column: "user_id"           # ← CHANGE to your ID column name
-  date_column: "event_date"           # optional, for reference
-  amount_column: "amount"             # optional
-
-cleaning:
-  drop_duplicates: true
-  fill_missing_strategy: "auto"       # auto | median | mean | mode | drop
-  outlier_columns: []                 # leave empty to skip outlier removal
-
-features:
-  encode_categorical: true
-  scale_numerical: true
-
-segmentation:
-  n_clusters: null                    # null = auto-detect, or set 3/4/5
-  method: "kmeans"
-
-prediction:
-  target_column: null                 # null = auto-detect or use segments
-  model_type: "auto"                  # auto selects best of RF vs LR
-  test_size: 0.2
-
-output:
-  dir: "output"
-  excel_report: true
-  html_report: true
-  save_charts: true
-```
-
-### 4.4 Programmatic Usage (Python)
-
-```python
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from data_loader import DataLoader
-from data_cleaner import DataCleaner
-from feature_engineering import FeatureEngineer
-from user_segmentation import UserSegmentation
-from behavior_prediction import BehaviorPredictor
-
-# Load and clean
-loader = DataLoader("data/my_data.csv")
-df = loader.load()
-
-cleaner = DataCleaner(df)
-cleaner.drop_duplicates().fill_missing("auto").correct_dtypes()
-df_clean = cleaner.get_clean_data()
-
-# Feature engineering
-engineer = FeatureEngineer(df_clean)
-engineer.auto_process(id_column="user_id")
-df_feat = engineer.get_features()
-
-# Segmentation
-segmenter = UserSegmentation(df_feat)
-labels = segmenter.auto_segment()
-print(segmenter.get_segment_profiles())
-print(segmenter.get_segment_summary())
-
-# Prediction
-predictor = BehaviorPredictor(df_feat)
-predictor.auto_predict(segment_labels=labels)
-print(predictor.get_metrics())
-print(predictor.get_feature_importance())
+# Web 界面
+streamlit run app.py
 ```
 
 ---
 
-## 5. Error Handling Philosophy
+## 7. 输出物
 
-Every step is wrapped in `try/except` in `main.py`. If any step fails:
-
-- **Load fails** → pipeline stops (no data = nothing to analyze)
-- **Clean/Feature/Segment/Predict/Visualize fails** → warning printed, pipeline continues with best-effort data
-- **Report fails** → warning printed, charts still available
-
-This means you can feed it messy real-world data and still get useful outputs.
+- 7 类图表：分群分布 / 分群画像 / 相关性热力图 / 特征重要性 / 混淆矩阵 / 预测概率分布 / 模型性能卡
+- Excel 报告（分群/画像/重要性/指标 4 工作表）+ 自包含 HTML 报告
+- Agent 执行轨迹：任务计划、每步工具结果、Critic 决策（UI「执行轨迹」Tab）
+- 长期记忆落盘：`output/memory/`

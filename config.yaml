@@ -1,46 +1,33 @@
 # UserInsight Agent Configuration
+# LangGraph 自主规划式分析 Agent
 
 # --- Data Settings ---
 data:
   file_path: "data/sample_user_data.csv"   # Input data file path
-  user_id_column: "user_id"                 # User identifier column
-  date_column: "event_date"                 # Date/time column
-  amount_column: "amount"                   # Monetary column (optional)
+  user_id_column: "user_id"                 # User identifier column (optional hint)
 
 # --- Data Cleaning ---
 cleaning:
   drop_duplicates: true
   fill_missing_strategy: "auto"             # auto | median | mean | mode | drop
-  outlier_method: "iqr"                     # iqr, zscore
-  outlier_columns: []                       # Columns to check outliers (empty=auto)
-
-# --- Feature Engineering ---
-features:
-  encode_categorical: true                  # Encode categorical columns
-  encode_method: "onehot"                   # onehot, label
-  scale_numerical: true                     # Scale numerical features
-  scale_method: "standard"                  # standard, minmax
-
-# --- User Segmentation ---
-segmentation:
-  method: "kmeans"                          # kmeans (RFM removed for simplicity)
-  n_clusters: null                          # null = Agent auto-selects via elbow method
-
-# --- Behavior Prediction ---
-prediction:
-  target_column: null                       # null = auto-detect or use Agent suggestion
-  model_type: "auto"                        # auto = Agent selects RF vs LR via cross-val
-  test_size: 0.2                            # Test split ratio
+  high_missing_threshold: 0.8               # drop columns missing > 80%
+  outlier_method: "iqr"
 
 # --- LLM Agent Settings ---
 llm:
-  enabled: true                             # Enable/disable Agent decision layer
+  enabled: true                             # Enable/disable LLM decision layer
   model: "deepseek-chat"                    # LLM model name
   temperature: 0.3                          # Lower = more deterministic
+
+# --- Agent Orchestration (LangGraph) ---
+agent:
+  max_iterations: 15                        # Hard cap on planner/executor/critic loop turns
+  max_retries_per_step: 3                   # Critic retry budget per tool step
+  memory_dir: "output/memory"               # ChromaDB persistent memory location
 
 # --- Output ---
 output:
   dir: "output"                             # Output directory
-  excel_report: true                        # Generate Excel report
-  html_report: true                         # Generate HTML report
-  save_charts: true                         # Save individual charts
+  excel_report: true
+  html_report: true
+  save_charts: true

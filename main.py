@@ -1,11 +1,19 @@
 """
 UserInsight Agent — Main Entry Point
 
-Agent-powered analysis pipeline with LLM decision nodes:
-0. LLM diagnoses data → cleaning plan
-1. Load data      2. Clean data (LLM-guided)  3. Feature engineering
-4. Segmentation (LLM-planned)  5. Prediction   6. Visualization
-7. Report + LLM business insights
+LangGraph-based autonomous analysis agent (Plan-and-Execute with a
+reflection loop):
+
+    Planner → Executor ⇄ Critic → Summarizer
+
+- Planner decomposes the natural-language goal into a tool plan,
+  enriched by long-term memory (ChromaDB).
+- Executor picks tools/args via Function Calling and runs them.
+- Critic evaluates each result; failures trigger retries (the loop).
+- Summarizer produces the final business report and writes memory.
+
+Every LLM node has a deterministic fallback, so the graph also runs
+without an API key (static plan + rule-based critic).
 """
 
 import sys
@@ -16,18 +24,13 @@ import yaml
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from data_loader import DataLoader
-from data_cleaner import DataCleaner
-from feature_engineering import FeatureEngineer
-from user_segmentation import UserSegmentation
-from behavior_prediction import BehaviorPredictor
-from visualization import Visualizer
-from report_generator import ReportGenerator
-from llm_client import get_client
-from llm_diagnoser import LLMDiagnoser
-from llm_planner import LLMPlanner
-from llm_insight import LLMInsight
+from agent_graph import run_agent
+from agent_tools import ws
 
+
+# ═══════════════════════════════════════════════════════════════
+#  Config
+# ═══════════════════════════════════════════════════════════════
 
 def load_config(config_path: str = "config.yaml") -> dict:
     """Load configuration from YAML file."""
@@ -36,324 +39,126 @@ def load_config(config_path: str = "config.yaml") -> dict:
         print(f"Config not found: {config_path}, using defaults.")
         return _default_config()
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        return yaml.safe_load(f) or {}
 
 
 def _default_config() -> dict:
     """Return a minimal default config."""
     return {
-        "data": {"file_path": "data/sample_user_data.csv", "user_id_column": "user_id"},
-        "cleaning": {"fill_missing_strategy": "auto"},
+        "data": {"file_path": "data/sample_user_data.csv"},
         "output": {"dir": "output"},
-        "prediction": {"target_column": None},
-        "segmentation": {"n_clusters": None},
         "llm": {"enabled": True},
+        "agent": {"max_iterations": 15},
     }
 
 
-def _step(n: int, total: int, desc: str, agent: bool = False):
-    """Print a step header. agent=True adds an '[Agent]' tag."""
-    tag = "[Agent]" if agent else "      "
-    print(f"\n[{n}/{total}] {tag} {desc}")
-
-
 # ═══════════════════════════════════════════════════════════════
-#  MAIN PIPELINE (also importable as main_pipeline())
+#  Main pipeline (also importable as main_pipeline())
 # ═══════════════════════════════════════════════════════════════
 
-def main_pipeline(file_path: str = None, api_key: str = None) -> dict:
-    """
-    Run the full analysis pipeline. Returns a dict with all results.
-    Can be called from CLI or programmatically (e.g., from app.py).
+def main_pipeline(
+    file_path: str = None,
+    api_key: str = None,
+    goal: str = None,
+    max_iterations: int = None,
+) -> dict:
+    """Run the agent graph on a dataset and return structured results.
+
+    Args:
+        file_path : CSV/Excel path; defaults to config data.file_path
+        api_key   : LLM API key; defaults to DEEPSEEK_API_KEY env
+        goal      : natural-language analysis goal; defaults to the
+                    standard profiling + churn-prediction goal
+        max_iterations : cap on planner/executor/critic loop turns
+
+    Returns a dict with the same keys as the legacy pipeline:
+        profiles, segment_labels, importance_df, chart_paths,
+        pred_metrics, llm_insight, output_dir — plus agent extras:
+        plan, tool_results, error, done
     """
     config = load_config()
     output_dir = config.get("output", {}).get("dir", "output")
     llm_enabled = config.get("llm", {}).get("enabled", True)
-    data_path = file_path or config["data"]["file_path"]
+    data_path = file_path or config.get("data", {}).get(
+        "file_path", "data/sample_user_data.csv")
+    if max_iterations is None:
+        max_iterations = config.get("agent", {}).get("max_iterations", 15)
 
-    # Init LLM client
-    llm = get_client(api_key)
-    if not llm.available:
-        llm_enabled = False
-
-    chart_paths = []
-    segment_labels = None
-    profiles = None
-    importance_df = None
-    llm_diagnosis = None
-    llm_plan = None
-    llm_insight = None
-
-    total_steps = 8 if llm_enabled else 7
-    step = 0
+    if goal is None:
+        goal = ("对这批用户数据进行完整分析：诊断数据质量并清洗，"
+                "构建特征，进行用户分群画像，训练流失/行为预测模型，"
+                "输出图表、报告与业务洞察。")
 
     print("=" * 60)
-    print("  UserInsight Agent — User Profiling & Behavior Analysis")
-    print(f"  LLM Decision Layer: {'ACTIVE' if llm_enabled else 'inactive (no API key)'}")
+    print("  UserInsight Agent — LangGraph 自主分析 Agent")
+    print(f"  Goal: {goal[:40]}...")
+    print(f"  Data: {data_path}")
+    print(f"  Agent mode: {'LLM 决策' if llm_enabled else '确定性降级'}")
     print("=" * 60)
 
-    # ═══ Step 1: Load ═══════════════════════════════════════
-    df = None
+    if not llm_enabled:
+        api_key = None
+
+    # Reset the shared tool workspace for a clean run
+    ws.reset(data_path=data_path, output_dir=output_dir)
+
+    result = None
     try:
-        step += 1
-        _step(step, total_steps, "Loading data...")
-        loader = DataLoader(data_path)
-        df = loader.load()
-    except Exception as e:
-        print(f"  ERROR loading data: {e}")
-        return {"error": str(e)}
-
-    # ═══ Step 1.5 (Agent): LLM Data Diagnosis ═════════════
-    if llm_enabled:
-        try:
-            step += 1
-            _step(step, total_steps,
-                  "Agent is diagnosing data quality...", agent=True)
-            diagnoser = LLMDiagnoser()
-            llm_diagnosis = diagnoser.diagnose(df)
-            if llm_diagnosis:
-                for issue in llm_diagnosis.get("issues_found", []):
-                    print(f"  Issue: {issue}")
-                quality = llm_diagnosis.get("overall_quality", "?")
-                print(f"  Quality: {quality}")
-                # Apply LLM-suggested ID column
-                llm_ids = llm_diagnosis.get("id_columns", [])
-                if llm_ids and not config.get("data", {}).get("user_id_column"):
-                    config.setdefault("data", {})["user_id_column"] = llm_ids[0]
-                    print(f"  Agent detected ID: {llm_ids[0]}")
-        except Exception as e:
-            print(f"  Agent diagnosis skipped: {e}")
-
-    # ═══ Step 2: Clean ═════════════════════════════════════
-    try:
-        step += 1
-        _step(step, total_steps, "Cleaning data...")
-        cleaner = DataCleaner(df)
-        drop_dupes = config.get("cleaning", {}).get("drop_duplicates", True)
-        if drop_dupes:
-            cleaner.drop_duplicates()
-
-        # Use LLM fill strategies if available, else config fallback
-        if llm_diagnosis and llm_diagnosis.get("fill_strategy"):
-            fill_map = llm_diagnosis["fill_strategy"]
-            for col, strat in fill_map.items():
-                if col in df.columns:
-                    cleaner.fill_missing(strat)
-        else:
-            strategy = config.get("cleaning", {}).get("fill_missing_strategy", "auto")
-            cleaner.fill_missing(strategy)
-
-        # Outlier removal from LLM or config
-        if llm_diagnosis and llm_diagnosis.get("outlier_columns"):
-            cleaner.remove_outliers(llm_diagnosis["outlier_columns"])
-        elif config.get("cleaning", {}).get("outlier_columns"):
-            cleaner.remove_outliers(config["cleaning"]["outlier_columns"])
-
-        cleaner.correct_dtypes()
-        df_clean = cleaner.get_clean_data()
-    except Exception as e:
-        print(f"  WARNING in cleaning: {e}, continuing with raw data.")
-        df_clean = df
-
-    # ═══ Step 3: Feature Engineering ═══════════════════════
-    try:
-        step += 1
-        _step(step, total_steps, "Engineering features...")
-        id_col = config.get("data", {}).get("user_id_column")
-        engineer = FeatureEngineer(df_clean)
-        engineer.auto_process(id_column=id_col)
-        df_features = engineer.get_features()
-    except Exception as e:
-        print(f"  WARNING in feature eng: {e}")
-        df_features = df_clean.select_dtypes(include=["number"])
-
-    # ═══ Step 3.5 (Agent): LLM Strategy Planning ══════════
-    if llm_enabled:
-        try:
-            step += 1
-            _step(step, total_steps,
-                  "Agent is planning analysis strategy...", agent=True)
-            planner = LLMPlanner()
-            llm_plan = planner.plan(df_features)
-            if llm_plan:
-                seg_p = llm_plan.get("segmentation", {})
-                pred_p = llm_plan.get("prediction", {})
-                print(f"  Clusters: {seg_p.get('n_clusters', '?')} "
-                      f"({seg_p.get('reasoning', '')})")
-                print(f"  Model: {pred_p.get('model_preference', '?')} "
-                      f"({pred_p.get('reasoning', '')})")
-        except Exception as e:
-            print(f"  Agent planning skipped: {e}")
-
-    # ═══ Step 4: Segmentation ══════════════════════════════
-    try:
-        step += 1
-        _step(step, total_steps, "Segmenting users...")
-        n_clusters = config.get("segmentation", {}).get("n_clusters")
-        if llm_plan and n_clusters is None:
-            n_clusters = llm_plan.get("segmentation", {}).get("n_clusters")
-        segmenter = UserSegmentation(df_features)
-        segment_labels = segmenter.auto_segment(n_clusters=n_clusters)
-        profiles = segmenter.get_segment_profiles()
-    except Exception as e:
-        print(f"  WARNING in segmentation: {e}")
-
-    # ═══ Step 5: Prediction ════════════════════════════════
-    try:
-        step += 1
-        _step(step, total_steps, "Training prediction model...")
-        target_col = config.get("prediction", {}).get("target_column")
-        if llm_plan and not target_col:
-            target_col = llm_plan.get("prediction", {}).get("recommended_target")
-        predictor = BehaviorPredictor(df_features)
-        predictor.auto_predict(target_column=target_col, segment_labels=segment_labels)
-        importance_df = predictor.get_feature_importance()
-    except Exception as e:
-        print(f"  WARNING in prediction: {e}")
-        predictor = None
-
-    # ═══ Step 6: Visualization ═════════════════════════════
-    try:
-        step += 1
-        _step(step, total_steps, "Generating charts...")
-        viz = Visualizer(output_dir)
-
-        # Segment charts
-        if segment_labels is not None:
-            p = viz.plot_segment_distribution(segment_labels)
-            if p:
-                chart_paths.append(p)
-        if profiles is not None and not profiles.empty:
-            p = viz.plot_segment_profiles(profiles)
-            if p:
-                chart_paths.append(p)
-
-        # Correlation heatmap
-        p = viz.plot_correlation_heatmap(df_features)
-        if p:
-            chart_paths.append(p)
-
-        # Feature importance
-        if importance_df is not None and not importance_df.empty:
-            p = viz.plot_feature_importance(importance_df)
-            if p:
-                chart_paths.append(p)
-
-        # ══ Prediction charts ══
-        if predictor is not None and predictor.y_test_ is not None:
-            # Confusion matrix
-            class_names = [f"Not {predictor._target_col}", predictor._target_col] \
-                if hasattr(predictor, '_target_col') else None
-            p = viz.plot_confusion_matrix(
-                predictor.y_test_, predictor.y_pred_,
-                class_names=class_names,
-            )
-            if p:
-                chart_paths.append(p)
-
-            # Prediction probability distribution
-            if predictor.y_proba_ is not None:
-                p = viz.plot_prediction_distribution(
-                    predictor.y_test_, predictor.y_proba_,
-                    target_name=predictor._target_col if hasattr(predictor, '_target_col') else "target",
-                )
-                if p:
-                    chart_paths.append(p)
-
-            # Model performance card
-            p = viz.plot_model_performance(predictor.get_metrics())
-            if p:
-                chart_paths.append(p)
-
-    except Exception as e:
-        print(f"  WARNING in visualization: {e}")
-
-    # ═══ Step 6.5 (Agent): LLM Business Insight ═══════════
-    if llm_enabled:
-        try:
-            step += 1
-            _step(step, total_steps,
-                  "Agent is generating business insights...", agent=True)
-            seg_summary = segmenter.get_segment_summary() if (
-                segmenter is not None and segment_labels is not None
-            ) else {}
-            pred_metrics = predictor.get_metrics() if predictor else {}
-            fi_text = importance_df.head(5).to_string() if (
-                importance_df is not None and not importance_df.empty
-            ) else ""
-
-            insight_gen = LLMInsight()
-            llm_insight = insight_gen.generate(
-                segments_summary=seg_summary,
-                model_metrics=pred_metrics,
-                feature_importance=fi_text,
-                data_summary=f"{len(df)} rows, {len(df.columns)} cols",
-            )
-            if llm_insight:
-                print(f"  {llm_insight.get('headline', '')}")
-        except Exception as e:
-            print(f"  Agent insight skipped: {e}")
-
-    # ═══ Step 7: Report ════════════════════════════════════
-    try:
-        step += 1
-        _step(step, total_steps, "Generating reports...")
-        reporter = ReportGenerator(output_dir)
-
-        seg_summary = segmenter.get_segment_summary() if (
-            segmenter is not None and segment_labels is not None
-        ) else {}
-        pred_metrics = predictor.get_metrics() if predictor else {}
-
-        report_summary = {
-            "Data": f"{len(df)} rows, {len(df.columns)} cols",
-            "Segments": seg_summary,
-            "Model": pred_metrics,
-        }
-        if llm_insight:
-            report_summary["Agent Headline"] = llm_insight.get("headline", "")
-            for i, f in enumerate(llm_insight.get("top_findings", []), 1):
-                report_summary[f"Finding {i}"] = f
-            for i, r in enumerate(llm_insight.get("recommendations", []), 1):
-                report_summary[f"Recommendation {i}"] = r
-
-        reporter.print_console_summary(report_summary)
-        reporter.generate_excel(
-            segments_df=profiles, profiles_df=profiles,
-            importance_df=importance_df, metrics=pred_metrics,
-        )
-        reporter.generate_html_summary(
-            summary=report_summary, chart_paths=chart_paths,
+        result = run_agent(
+            goal=goal,
+            data_path=data_path,
+            api_key=api_key,
+            max_iterations=max_iterations,
         )
     except Exception as e:
-        print(f"  WARNING in report generation: {e}")
+        print(f"  ERROR in agent run: {e}")
+        return {"error": str(e), "done": False}
 
-    # ── Done ─────────────────────────────────────────────────
-    print("\n" + "=" * 60)
-    print(f"  Analysis complete! Results in '{output_dir}/'")
-    if chart_paths:
-        print(f"  Charts: {len(chart_paths)} generated")
-    if llm_insight:
-        print(f"  Agent insights: generated")
-    print("=" * 60)
+    if result.get("error"):
+        return result
 
-    return {
+    # ── Normalize to the legacy result shape ──
+    report = result.get("report") or {}
+    seg_summary = {}
+    profiles = report.get("profiles")
+    if profiles is not None and not profiles.empty:
+        for _, row in profiles.iterrows():
+            label = row.get("segment", row.name)
+            seg_summary[label] = {
+                "count": int(row["count"]),
+                "pct": round(float(row["pct"]), 1),
+            }
+    out = {
         "profiles": profiles,
-        "segment_labels": segment_labels,
-        "importance_df": importance_df,
-        "chart_paths": chart_paths,
+        "segment_labels": report.get("segment_labels"),
+        "importance_df": report.get("importance_df"),
+        "chart_paths": report.get("chart_paths", []),
+        "pred_metrics": report.get("pred_metrics", {}),
         "seg_summary": seg_summary,
-        "pred_metrics": pred_metrics,
-        "llm_insight": llm_insight,
-        "llm_diagnosis": llm_diagnosis,
-        "llm_plan": llm_plan,
+        "llm_insight": report.get("llm_insight"),
         "output_dir": output_dir,
+        # Agent extras
+        "plan": result.get("plan", []),
+        "tool_results": result.get("tool_results", {}),
+        "done": result.get("done", False),
+        "error": result.get("error"),
     }
+
+    print("\n" + "=" * 60)
+    print("  Agent 分析完成")
+    if out["chart_paths"]:
+        print(f"  图表: {len(out['chart_paths'])} 张 → {output_dir}/")
+    if out["llm_insight"]:
+        print(f"  Agent 洞察: {out['llm_insight'].get('headline', '')[:60]}")
+    print("=" * 60)
+    return out
 
 
 def main():
     """CLI entry point."""
-    main_pipeline()
+    result = main_pipeline()
+    if result.get("error"):
+        print(f"\n  FAILED: {result['error']}")
 
 
 if __name__ == "__main__":

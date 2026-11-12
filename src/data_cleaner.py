@@ -2,7 +2,10 @@
 Data Cleaning Module
 
 Handles missing values, outlier detection, data type correction,
-and duplicate removal.
+and duplicate removal. Hardens against dirty-data edge cases:
+- high-missing-rate columns (dropped above threshold, else filled)
+- constant / zero-variance columns (dropped, no signal)
+- infinite values (coerced to NaN then filled)
 """
 
 import pandas as pd
@@ -20,9 +23,14 @@ class DataCleaner:
         cleaner.drop_duplicates().fill_missing().correct_dtypes()
     """
 
+    # Columns missing more than this share of values are dropped
+    # rather than filled (single-value fill would distort the data).
+    HIGH_MISSING_THRESHOLD = 0.8
+
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
-        self._stats = {"before": len(df), "duplicates_dropped": 0, "nulls_filled": 0}
+        self._stats = {"before": len(df), "duplicates_dropped": 0,
+                       "nulls_filled": 0, "columns_dropped": []}
 
     def drop_duplicates(self) -> "DataCleaner":
         """Remove duplicate rows."""
@@ -39,7 +47,35 @@ class DataCleaner:
         - 'auto': median for numeric, mode for categorical (default)
         - 'median' / 'mean' / 'mode': apply to all
         - 'drop': drop rows with any NaN
+
+        Edge cases:
+        - inf values are coerced to NaN first
+        - columns missing > HIGH_MISSING_THRESHOLD are dropped
+          (single-value fill would inject fake signal)
+        - constant columns are dropped (zero variance, no signal)
         """
+        # ── inf -> NaN (breaks scaling/clustering otherwise) ──
+        inf_count = int(np.isinf(
+            self.df.select_dtypes(include=[np.number])).sum().sum())
+        if inf_count:
+            self.df = self.df.replace([np.inf, -np.inf], np.nan)
+            print(f"  Coerced {inf_count} infinite values to NaN")
+
+        # ── Drop columns missing too much ──────────────────────
+        threshold = self.HIGH_MISSING_THRESHOLD
+        drop_cols = [
+            c for c in self.df.columns
+            if self.df[c].isnull().mean() >= threshold
+        ]
+        if drop_cols:
+            self.df = self.df.drop(columns=drop_cols)
+            self._stats["columns_dropped"] += drop_cols
+            print(f"  Dropped {len(drop_cols)} column(s) with >"
+                  f"{int(threshold*100)}% missing: {drop_cols}")
+
+        if self.df.empty or len(self.df.columns) == 0:
+            raise ValueError("All columns dropped — data unusable.")
+
         if strategy == "drop":
             self.df = self.df.dropna()
             return self
@@ -69,6 +105,14 @@ class DataCleaner:
                 self.df[col] = self.df[col].fillna(fill_val)
 
             self._stats["nulls_filled"] += 1
+
+        # ── Drop constant columns (no signal) ───────────────
+        const_cols = [c for c in self.df.columns
+                      if self.df[c].nunique(dropna=True) <= 1]
+        if const_cols:
+            self.df = self.df.drop(columns=const_cols)
+            self._stats["columns_dropped"] += const_cols
+            print(f"  Dropped {len(const_cols)} constant column(s): {const_cols}")
 
         nulls_remaining = self.df.isnull().sum().sum()
         print(f"  Nulls remaining after fill: {nulls_remaining}")
