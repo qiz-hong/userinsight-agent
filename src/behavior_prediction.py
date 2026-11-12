@@ -19,9 +19,11 @@ from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 
-# Candidate pool for auto model selection (all scikit-learn, no extra deps)
+# Candidate pool for auto model selection. The boosted-tree trio is
+# lazily imported so the pool degrades gracefully if a lib is missing.
 MODEL_POOL = ["LogisticRegression", "RandomForest",
-              "GradientBoosting", "SVC"]
+              "GradientBoosting", "SVC",
+              "XGBoost", "LightGBM", "CatBoost"]
 
 
 class BehaviorPredictor:
@@ -144,6 +146,18 @@ class BehaviorPredictor:
         if name == "SVC":
             return SVC(probability=True, random_state=42,
                        class_weight="balanced")
+        if name == "XGBoost":
+            from xgboost import XGBClassifier
+            return XGBClassifier(n_estimators=100, random_state=42,
+                                 eval_metric="logloss")
+        if name == "LightGBM":
+            from lightgbm import LGBMClassifier
+            return LGBMClassifier(n_estimators=100, random_state=42,
+                                  verbose=-1)
+        if name == "CatBoost":
+            from catboost import CatBoostClassifier
+            return CatBoostClassifier(iterations=100, random_seed=42,
+                                      verbose=0)
         return None
 
     def _select_model(self, X_train, y_train, X_test, y_test, model="auto"):

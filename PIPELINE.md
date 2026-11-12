@@ -49,10 +49,11 @@
 |---|---|---|
 | `load_data` | 加载 CSV/Excel | file_path |
 | `inspect_schema` | 结构摘要（dtype/唯一值/缺失率） | — |
+| `query_data` | 自然语言查数（DuckDB，只读+行数护栏） | sql, question |
 | `clean_data` | 去重/填充/离群剔除 | fill_strategy, drop_outliers |
 | `engineer_features` | 类型识别/编码/缩放/时间特征 | id_column |
-| `segment_users` | 四算法自动择优分群（K-Means/GMM/层次/DBSCAN，轮廓系数评选） | n_clusters（0=肘部自动）, method |
-| `train_predictor` | 四模型交叉验证选模（LR/RF/GBDT/SVM） | target_column, model |
+| `segment_users` | 五算法自动择优分群（K-Means/GMM/层次/DBSCAN/HDBSCAN + PCA/UMAP） | n_clusters, method, reduce |
+| `train_predictor` | 七模型交叉验证选模（LR/RF/GBDT/SVM/XGBoost/LightGBM/CatBoost） | target_column, model |
 | `plot_charts` | 7 类图表 | — |
 | `generate_report` | Excel + HTML 报告 | — |
 | `quality_check` | 数据质量指标（供 Critic） | — |

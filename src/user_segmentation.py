@@ -19,15 +19,19 @@ from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
 from sklearn.mixture import GaussianMixture
 from sklearn.metrics import silhouette_score
 from sklearn.neighbors import NearestNeighbors
+from sklearn.decomposition import PCA
 
-# DBSCAN's neighbor graph is O(n^2) — skip beyond this size
+# DBSCAN/HDBSCAN neighbor graphs are O(n^2) — skip beyond this size
 DBSCAN_MAX_SAMPLES = 10000
-# Reject DBSCAN if more than this share of points is noise
+# Reject DBSCAN/HDBSCAN if more than this share of points is noise
 DBSCAN_MAX_NOISE = 0.3
 # Silhouette is O(n^2) — subsample beyond this cap
 SILHOUETTE_SAMPLE_CAP = 3000
+# Features above this count trigger automatic dimensionality reduction
+REDUCE_IF_FEATURES_GT = 8
 
 PARTITION_METHODS = ("kmeans", "gmm", "hierarchical")
+DENSITY_METHODS = ("dbscan", "hdbscan")
 
 
 class UserSegmentation:
@@ -49,15 +53,19 @@ class UserSegmentation:
     # ── Main API ─────────────────────────────────────────────
 
     def auto_segment(self, n_clusters: int = None,
-                     method: str = "auto") -> np.ndarray:
+                     method: str = "auto",
+                     reduce: str = "auto") -> np.ndarray:
         """
         Segment users; auto-selects the clustering algorithm.
 
         Args:
             n_clusters: number of segments; None = auto (2-6 via elbow).
-            method: 'kmeans' | 'gmm' | 'hierarchical' | 'dbscan' | 'auto'.
-                    'auto' fits all eligible candidates and keeps the
-                    one with the highest silhouette score.
+            method: 'kmeans' | 'gmm' | 'hierarchical' | 'dbscan' |
+                    'hdbscan' | 'auto'. 'auto' fits all eligible
+                    candidates and keeps the best silhouette score.
+            reduce: 'auto' (PCA when features > REDUCE_IF_FEATURES_GT),
+                    'pca' | 'umap' | 'none' — dimensionality reduction
+                    applied before clustering.
         """
         self._feature_cols = self._pick_features()
         if len(self._feature_cols) < 2:
@@ -75,11 +83,17 @@ class UserSegmentation:
             return self.labels_
 
         X = self.df[self._feature_cols].fillna(0).values
+        X = self._maybe_reduce(X, reduce)
 
         if method == "dbscan":
             labels, _ = self._fit_dbscan(X)
             if labels is None:
                 print("  DBSCAN ineligible — falling back to kmeans.")
+                labels = self._fit_one("kmeans", X, n_clusters)
+        elif method == "hdbscan":
+            labels, _ = self._fit_hdbscan(X)
+            if labels is None:
+                print("  HDBSCAN ineligible — falling back to kmeans.")
                 labels = self._fit_one("kmeans", X, n_clusters)
         elif method in PARTITION_METHODS:
             labels = self._fit_one(method, X, n_clusters)
@@ -122,11 +136,15 @@ class UserSegmentation:
             if labels is not None and score is not None:
                 candidates[name] = (labels, score)
 
-        # DBSCAN needs no k but is O(n^2)-ish — small data only
+        # Density-based models need no k but are O(n^2)-ish —
+        # small data only
         if len(X) <= DBSCAN_MAX_SAMPLES:
             labels, score = self._fit_dbscan(X)
             if labels is not None and score is not None:
                 candidates["dbscan"] = (labels, score)
+            labels, score = self._fit_hdbscan(X)
+            if labels is not None and score is not None:
+                candidates["hdbscan"] = (labels, score)
 
         if not candidates:
             print("  All models failed — falling back to single segment.")
@@ -203,6 +221,61 @@ class UserSegmentation:
         print(f"  [dbscan] eps={eps:.3f}, {len(unique)} clusters, "
               f"silhouette={None if score is None else round(score, 4)}")
         return labels, score
+
+    def _fit_hdbscan(self, X: np.ndarray):
+        """HDBSCAN (DBSCAN's hierarchical sibling): auto cluster sizes.
+        Rejected on tiny data, <2 clusters, or excessive noise."""
+        n = len(X)
+        if n < 20:
+            return None, None
+        try:
+            from hdbscan import HDBSCAN
+        except ImportError:
+            print("  [hdbscan] not installed — skipped")
+            return None, None
+        min_cluster_size = max(5, n // 20)
+        labels = HDBSCAN(min_cluster_size=min_cluster_size,
+                         min_samples=3).fit_predict(X)
+        unique = set(labels)
+        if len(unique) < 2:
+            print("  [hdbscan] single cluster — skipped")
+            return None, None
+        noise_ratio = float((labels == -1).mean())
+        if noise_ratio > DBSCAN_MAX_NOISE:
+            print(f"  [hdbscan] noise={noise_ratio:.0%} > "
+                  f"{DBSCAN_MAX_NOISE:.0%} — skipped")
+            return None, None
+        score = self._safe_silhouette(X[labels != -1], labels[labels != -1])
+        self._set_meta("hdbscan", len(unique), score)
+        print(f"  [hdbscan] {len(unique)} clusters, "
+              f"silhouette={None if score is None else round(score, 4)}")
+        return labels, score
+
+    def _maybe_reduce(self, X: np.ndarray, reduce: str) -> np.ndarray:
+        """Optional PCA/UMAP pre-reduction for high-dimensional data.
+        Returns X unchanged on failure — reduction never blocks."""
+        n_features = X.shape[1]
+        if reduce == "none" or (reduce == "auto"
+                                and n_features <= REDUCE_IF_FEATURES_GT):
+            return X
+        n_comp = min(8, n_features, len(X) - 1)
+        if n_comp < 2:
+            return X
+        try:
+            if reduce == "umap":
+                import umap
+                red = umap.UMAP(n_components=n_comp, random_state=42)
+                X_red = red.fit_transform(X)
+                print(f"  [reduce] UMAP: {n_features} -> {n_comp} dims")
+            else:  # 'pca' or 'auto'
+                red = PCA(n_components=n_comp, random_state=42)
+                X_red = red.fit_transform(X)
+                print(f"  [reduce] PCA: {n_features} -> {n_comp} dims "
+                      f"(explains {red.explained_variance_ratio_.sum():.0%})")
+            return X_red
+        except Exception as e:
+            print(f"  [reduce] {reduce} failed ({e}) — keeping full space")
+            return X
 
     def _safe_silhouette(self, X: np.ndarray, labels: np.ndarray) -> float:
         """Silhouette with guardrails: >=2 clusters, >=2 samples each;

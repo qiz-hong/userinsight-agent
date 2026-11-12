@@ -1,4 +1,4 @@
-# 基于LLM Agent决策的自适应用户画像与行为预测系统（UserInsight Agent）
+# 自主规划式用户画像与行为智能分析agent（UserInsight Agent）
 
 自主规划式用户智能分析 Agent —— 基于 **LangGraph** 的 LLM Agent，面向数据分析 / 数据科学岗位的项目。
 
@@ -10,8 +10,10 @@
 LLM 将自然语言目标分解为带依赖关系的工具调用计划（DAG），并从 ChromaDB 长期记忆中召回历史 schema 与有效策略作为规划上下文。
 
 ### 2. 工具调用（Executor）
-9 类分析工具通过 Function Calling 暴露给 LLM，由 Agent 自主选择工具与参数：
-`load_data` / `inspect_schema` / `clean_data` / `engineer_features` / `segment_users` / `train_predictor` / `plot_charts` / `generate_report` / `quality_check`
+10 类分析工具通过 Function Calling 暴露给 LLM，由 Agent 自主选择工具与参数：
+`load_data` / `inspect_schema` / `query_data` / `clean_data` / `engineer_features` / `segment_users` / `train_predictor` / `plot_charts` / `generate_report` / `quality_check`
+
+其中 `query_data` 支持**自然语言查数**：内置 DuckDB 列式引擎，问题自动翻译为 SQL（只读校验 + 行数上限护栏），数据不进 LLM、查询不离内存。
 
 ### 3. 反思循环（Critic）
 每步执行后评估结果与数据质量指标，未达标自动回溯重试（清洗-诊断闭环、分群-评估闭环、预测-基线闭环）。以最大迭代轮数与重试预算为护栏，保证可控终止。
@@ -26,8 +28,8 @@ LLM 将自然语言目标分解为带依赖关系的工具调用计划（DAG）�
 - **高缺失率列（>80%）自动剔除**，避免单值填充引入假信号
 - 常量列（零方差）自动剔除、inf 值自动转 NaN
 - 4 类字段类型自动识别（时间/分类/数值/ID）
-- 聚类四算法（K-Means / GMM / 层次 / DBSCAN）按轮廓系数自动择优，DBSCAN 带噪声率与规模护栏
-- 分类四模型（LR / RF / GBDT / SVM）按分层交叉验证自动选模，不平衡标签自动加平衡权重
+- 聚类五算法（K-Means / GMM / 层次 / DBSCAN / HDBSCAN）按轮廓系数自动择优，DBSCAN/HDBSCAN 带噪声率与规模护栏，高维数据自动 PCA/UMAP 预降维
+- 分类七模型（LR / RF / GBDT / SVM / XGBoost / LightGBM / CatBoost）按分层交叉验证自动选模，不平衡标签自动加平衡权重，缺失库自动跳过不阻断
 
 ### 6. 优雅降级
 无 API Key 时每个 LLM 节点回退为确定性策略（静态计划 + 规则 Critic），全流程仍可运行。
@@ -52,14 +54,14 @@ userinsight-agent/
 ├── requirements.txt
 ├── src/
 │   ├── agent_graph.py         # LangGraph 图（planner/executor/critic/summarize）
-│   ├── agent_tools.py         # 9 个 Function Calling 工具
+│   ├── agent_tools.py         # 10 个 Function Calling 工具（含 DuckDB 自然语言查数）
 │   ├── graph_state.py         # AgentState 状态定义
 │   ├── memory_store.py        # ChromaDB 长期记忆（JSON 兜底）
 │   ├── data_loader.py         # 加载 + 列名清洗 + 边界处理
 │   ├── data_cleaner.py        # 清洗 + 高缺失列策略
 │   ├── feature_engineering.py # 特征工程（自动类型识别）
-│   ├── user_segmentation.py   # 四算法自动择优分群（K-Means/GMM/层次/DBSCAN）
-│   ├── behavior_prediction.py # 流失预测（LR/RF/GBDT/SVM 自动选模）
+│   ├── user_segmentation.py   # 五算法自动择优分群（K-Means/GMM/层次/DBSCAN/HDBSCAN + PCA/UMAP）
+│   ├── behavior_prediction.py # 流失预测（LR/RF/GBDT/SVM/XGBoost/LightGBM/CatBoost 自动选模）
 │   ├── visualization.py       # 7 类图表
 │   └── report_generator.py    # Excel / HTML / 控制台报告
 ├── data/                      # 输入数据（含示例）

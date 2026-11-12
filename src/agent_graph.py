@@ -151,8 +151,9 @@ Given the user's goal and the dataset schema, produce a JSON plan.
 Rules:
 - Output ONLY JSON: {"plan": [{"tool": str, "args": dict, "criteria": str}]}
 - Available tools and their args:
-  load_data(file_path), inspect_schema(), clean_data(fill_strategy, drop_outliers, outlier_columns),
-  engineer_features(id_column), segment_users(n_clusters, method),
+  load_data(file_path), inspect_schema(), query_data(sql, question),
+  clean_data(fill_strategy, drop_outliers, outlier_columns),
+  engineer_features(id_column), segment_users(n_clusters, method, reduce),
   train_predictor(target_column, model),
   plot_charts(), generate_report(), quality_check()
 - Plan only the tools needed to satisfy the goal, in dependency order.

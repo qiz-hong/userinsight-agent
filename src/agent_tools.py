@@ -87,6 +87,104 @@ def inspect_schema() -> str:
 
 
 @tool
+def query_data(sql: str = "", question: str = "") -> str:
+    """Query the loaded data with SQL via an embedded DuckDB engine.
+    Handles natural-language questions by translating them to SQL.
+
+    Args:
+        sql: explicit SELECT statement (validated, read-only, capped);
+             ignored when question is also given
+        question: natural-language question; translated to SQL with
+             the LLM and then executed the same way
+    """
+    df = ws.df_clean if ws.df_clean is not None else ws.df
+    if df is None:
+        return "ERROR: no data to query. Run load_data first."
+    try:
+        import duckdb
+    except ImportError:
+        return "ERROR: duckdb is not installed (pip install duckdb)."
+
+    # ── Translate natural language to SQL (LLM available?) ──
+    if not sql and question:
+        sql = _translate_question_to_sql(df, question)
+        if sql is None:
+            return ("ERROR: no API key — cannot translate the question "
+                    "to SQL. Pass an explicit sql= statement instead.")
+
+    if not sql:
+        return "ERROR: nothing to run. Give sql= or question=."
+
+    # ── Guardrails: read-only SELECT/WITH only ──
+    stripped = sql.strip().rstrip(";").lower()
+    if not (stripped.startswith("select") or stripped.startswith("with")):
+        return f"ERROR: only read-only SELECT/WITH statements are allowed. Got: {sql[:80]}"
+    if any(kw in stripped for kw in
+           (" insert ", " update ", " delete ", " drop ", " create ",
+            " alter ", " attach ", " copy ", " export ")):
+        return f"ERROR: statement contains a forbidden keyword. Got: {sql[:80]}"
+
+    try:
+        con = duckdb.connect()
+        con.register("data", df)
+        # Cap output size so a careless query can't flood the context
+        result = con.execute(f"SELECT * FROM (\n{sql}\n) LIMIT 500").fetchdf()
+        con.close()
+    except Exception as e:
+        return f"ERROR: query failed: {e}"
+
+    preview = result.head(10).to_string(index=False, max_colwidth=24)
+    return (f"OK: {len(result)} rows x {len(result.columns)} cols.\n"
+            f"Columns: {list(result.columns)[:20]}\nPreview:\n{preview}")
+
+
+def _translate_question_to_sql(df: pd.DataFrame, question: str) -> str | None:
+    """Ask the LLM to translate a question into a single SELECT.
+    Returns None when no LLM is available so the caller degrades."""
+    import os
+    api_key = os.environ.get("DEEPSEEK_API_KEY") \
+        or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from langchain_openai import ChatOpenAI
+        llm = ChatOpenAI(
+            base_url=os.environ.get("LLM_BASE_URL",
+                                    "https://api.deepseek.com/v1"),
+            api_key=api_key,
+            model=os.environ.get("LLM_MODEL", "deepseek-chat"),
+            temperature=0,
+            max_tokens=512,
+            timeout=60,
+        )
+    except Exception:
+        return None
+
+    cols = []
+    for c in df.columns[:30]:
+        cols.append(f"  {c}: {df[c].dtype}, unique={df[c].nunique()}")
+    system = (
+        "You translate business questions into DuckDB SQL over a table "
+        "named 'data' (double-quote column names).\n"
+        "Rules: output ONLY one SELECT statement, no explanation, no "
+        "markdown; only SELECT/WITH; never modify data; keep the result "
+        "aggregated unless detail rows are explicitly requested."
+    )
+    user = (f"Table 'data' schema:\n{chr(10).join(cols)}\n\n"
+            f"Question: {question}\n\nSQL:")
+    try:
+        msg = llm.invoke([{"role": "system", "content": system},
+                          {"role": "user", "content": user}])
+        raw = str(msg.content).strip()
+        # strip markdown fences if the model wraps them
+        import re
+        m = re.search(r"```(?:sql)?\s*([\s\S]*?)\s*```", raw)
+        return (m.group(1) if m else raw).strip().rstrip(";")
+    except Exception:
+        return None
+
+
+@tool
 def load_data(file_path: str = "") -> str:
     """Load a CSV/Excel file from disk. Returns shape and encoding info.
 
@@ -164,14 +262,16 @@ def engineer_features(id_column: str = "") -> str:
 
 
 @tool
-def segment_users(n_clusters: int = 0, method: str = "auto") -> str:
+def segment_users(n_clusters: int = 0, method: str = "auto",
+                  reduce: str = "auto") -> str:
     """Segment users with automatic model selection.
 
     Args:
         n_clusters: number of segments; 0 = auto-select via elbow method
         method: 'auto' (default) picks the best of kmeans / gmm /
-                hierarchical / dbscan by silhouette score; or name one
-                of those four explicitly
+                hierarchical / dbscan / hdbscan by silhouette score;
+                or name one of those five explicitly
+        reduce: 'auto' (PCA when features > 8) | 'pca' | 'umap' | 'none'
     """
     df_in = ws.df_features if ws.df_features is not None else (
         ws.df_clean if ws.df_clean is not None else ws.df)
@@ -181,7 +281,8 @@ def segment_users(n_clusters: int = 0, method: str = "auto") -> str:
         seg = UserSegmentation(df_in)
         k = n_clusters if n_clusters and n_clusters > 0 else None
         ws.segment_labels = seg.auto_segment(n_clusters=k,
-                                             method=method or "auto")
+                                             method=method or "auto",
+                                             reduce=reduce or "auto")
         ws.profiles = seg.get_segment_profiles()
         summary = seg.get_segment_summary()
         sil = seg.silhouette_
@@ -196,14 +297,14 @@ def segment_users(n_clusters: int = 0, method: str = "auto") -> str:
 @tool
 def train_predictor(target_column: str = "", model: str = "auto") -> str:
     """Train a behavior-prediction model. 'auto' selects the best of
-    LogisticRegression / RandomForest / GradientBoosting / SVC via
-    stratified cross-validation.
+    LogisticRegression / RandomForest / GradientBoosting / SVC /
+    XGBoost / LightGBM / CatBoost via stratified cross-validation.
 
     Args:
         target_column: name of the label column; '' = auto-resolve
                        (explicit column -> smallest segment as churn
                        -> auto-detect binary column)
-        model: 'auto' or one of the four model names above
+        model: 'auto' or one of the seven model names above
     """
     df_in = ws.df_features if ws.df_features is not None else (
         ws.df_clean if ws.df_clean is not None else ws.df)
@@ -339,6 +440,7 @@ def quality_check() -> str:
 ALL_TOOLS = [
     load_data,
     inspect_schema,
+    query_data,
     clean_data,
     engineer_features,
     segment_users,
